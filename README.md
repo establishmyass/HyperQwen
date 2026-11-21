@@ -5,9 +5,8 @@
 <p><b>Large Qwen models, served fast on the GPUs people actually own.</b></p>
 
 <p>
-<a href="https://github.com/syv-ai/HyperQwen/actions/workflows/docker-image.yml"><img alt="docker image" src="https://github.com/syv-ai/HyperQwen/actions/workflows/docker-image.yml/badge.svg"></a>
-<a href="https://github.com/syv-ai/HyperQwen/actions/workflows/patch-integrity.yml"><img alt="patch integrity" src="https://github.com/syv-ai/HyperQwen/actions/workflows/patch-integrity.yml/badge.svg"></a>
-<a href="https://github.com/syv-ai/HyperQwen/pkgs/container/hyperqwen"><img alt="ghcr.io" src="https://img.shields.io/badge/ghcr.io-syv--ai%2Fhyperqwen-2496ED?logo=docker&logoColor=white"></a>
+<a href="https://github.com/establishmyass/HyperQwen/actions/workflows/docker-image.yml"><img alt="docker image" src="https://github.com/establishmyass/HyperQwen/actions/workflows/docker-image.yml/badge.svg"></a>
+<a href="https://github.com/establishmyass/HyperQwen/actions/workflows/patch-integrity.yml"><img alt="patch integrity" src="https://github.com/establishmyass/HyperQwen/actions/workflows/patch-integrity.yml/badge.svg"></a>
 <a href="https://github.com/vllm-project/vllm"><img alt="vLLM 0.34.0" src="https://img.shields.io/badge/vLLM-0.34.0-5C3EE8"></a>
 <a href="LICENSE"><img alt="Apache 2.0" src="https://img.shields.io/github/license/syv-ai/HyperQwen"></a>
 <a href="https://github.com/syv-ai/HyperQwen/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/syv-ai/HyperQwen?style=flat"></a>
@@ -20,6 +19,10 @@
 <a href="docs/media/demo.mp4">1080p60 MP4</a> · <a href="bench/demo">how it is made</a></sub>
 
 </div>
+
+**This fork serves two model families.** Qwen uses the HyperQwen patch series on
+vLLM 0.34.0. Inkling 2 Mini uses vLLM's dedicated image with text, image,
+reasoning and tool-call support. [Start Inkling 2 Mini](#inkling-2-mini)
 
 **Today:** [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) on a single 24 GB
 consumer GPU with vLLM — 150k token context and an OpenAI-compatible API with key
@@ -40,14 +43,14 @@ have never touched.
 ## Quick start
 
 ```bash
-git clone https://github.com/syv-ai/HyperQwen && cd HyperQwen
+git clone https://github.com/establishmyass/HyperQwen && cd HyperQwen
 cp .env.example .env                      # PowerShell: Copy-Item .env.example .env
 
 docker compose --profile single up -d     # one or a few people chatting
 docker compose --profile batch  up -d     # API backend, many concurrent requests
 ```
 
-First start pulls the image (9.5 GB) and requantizes the model (~20 GB, once,
+First start builds the fork’s patched image and requantizes the model (~20 GB, once,
 into `./models`), then serves on `:18020`. One GPU runs one mode at a time.
 While the model downloads, compose shows `prepare-1 Waiting` and the server
 container stays at `Starting`; on a slow link that is tens of minutes, not a hang.
@@ -65,6 +68,31 @@ The model needs one card with 24 GB or more, or two cards together: on 16 GB or 
 - **No compose, or no Docker at all** —
   [docs/docker.md](docs/docker.md#plain-docker-no-compose) ·
   [docs/install.md](docs/install.md)
+
+## Inkling 2 Mini
+
+From this checkout, start the server on one supported NVIDIA GPU. vLLM lists H100/H200, B200/GB200, B300/GB300 and DGX Spark. The published checkpoint is about 20 GB. The image’s Inkling quantizer requires compute capability 9.0 or higher. An RTX 4090 (8.9) fails this check before weights load. [vLLM recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini) · [Model card](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
+
+```bash
+make up-inkling
+docker compose logs -f inkling
+```
+
+The first start downloads the weights into the persistent `inkling-cache` volume.
+The profile uses the upstream `inkling-2-mini` image because support for the looped
+architecture landed after vLLM 0.34.0. It enables the bundled DSpark drafter and
+the Inkling reasoning and tool parsers. The default context is 262,144 tokens.
+Set `INKLING_MAX_LEN` in `.env` to change it. Stop the current server with
+`make down` before switching profiles on the same GPU or port.
+
+Once the service is healthy, send a chat request. If you set `VLLM_API_KEY` or
+`PORT` in `.env`, export the same values in the client shell.
+
+```bash
+curl --fail-with-body "http://127.0.0.1:${PORT:-18020}/v1/chat/completions" \
+  -H "Authorization: Bearer ${VLLM_API_KEY:-EMPTY}" -H 'Content-Type: application/json' \
+  -d '{"model":"thinkingmachines/Inkling-2-Mini","messages":[{"role":"user","content":"What is 12 times 7?"}]}'
+```
 
 ## Which setup do I want?
 
@@ -119,6 +147,8 @@ an explicit `FA2_FP8KV=1` refuses it, and refuses any other `SPEC`/`CTX`. The ev
 3090 ([#153](https://github.com/syv-ai/HyperQwen/issues/153)): on 2026-10-18 (bare metal, 250 W, vLLM 0.31.0) the fp8 + FA2 arm passed every bar against the shipped int8 + Triton arm: GSM8K 0.950 vs 0.955 (n=200), perplexity +0.04%, 0 of 128 residues broken, a 20-minute soak with no restart, decode 54.0 vs 48.2 tok/s at ~66k and 48.2 vs 37.9 tok/s at ~100k (+27%), cold TTFT 75.5 vs 132.3 s and 54.7 vs 130.5 s, and a 3.3% larger pool (140,902 vs 136,429 tokens).
 
 ### The numbers behind that
+
+These historical Qwen results include Marlin int8 activations. vLLM 0.34 removed that mode. Batch now uses W4A16. [0.34 measurements](docs/vllm-0.34.md)
 
 | | **batch** → [batch/](batch/) | **single** → [single-user/](single-user/) |
 |---|---|---|

@@ -7,7 +7,7 @@ this.
 [← back to the main README](../README.md)
 
 The default install is the container ([Quick start](../README.md#quick-start) — the
-prebuilt image already contains everything this section builds), so this
+image contains everything this section builds), so this
 manual venv path is for hacking on the stack, or running it bare-metal.
 
 > **Python 3.14 works natively** — nothing in this repo needs changing, but
@@ -67,7 +67,7 @@ copied into the old venv can otherwise remain alongside the new pin.
 ## Install
 
 ```bash
-git clone https://github.com/syv-ai/HyperQwen ~/qwen-serving
+git clone https://github.com/establishmyass/HyperQwen ~/qwen-serving
 cd ~/qwen-serving
 
 python3 -m venv venv

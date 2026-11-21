@@ -93,12 +93,13 @@ MAX_QUERY_LEN_3D = 16
 # not: smaller adopts the larger pool (the declared capacity is the pool's), larger
 # allocates again and says so at WARNING. Either way the boot record shows it.
 #
-# The derivation is the one the builder used; it moved, it did not change. That
-# includes where the geometry comes from: head size and KV-head count are the
-# MODEL CONFIG's, as the builder reads them, not the layer's own arguments. The
-# two differ for a speculative drafter (its layers carry their own head size and
-# KV heads; its builder still sizes rows by the target config), and a pool keyed
-# on the layer's numbers is one the drafter's builder can never adopt.
+# The derivation is the one the builder used; it moved, it did not change. The
+# geometry (KV-head count, head size) is the caller's: the builder passes its
+# kv_cache_spec's, as it has read them since #56996, and the Impl passes its own
+# layer's, which are the numbers that spec is built from. They differ from the
+# model config for a speculative drafter (its layers carry their own head size and
+# KV heads), so a plan sized from the model config is one the drafter's builder
+# can never adopt.
 
 
 @dataclass(frozen=True)
@@ -114,10 +115,9 @@ class Mq3dScratchPlan:
     max_num_seqs: int
 
 
-def mq3d_scratch_plan(vllm_config: VllmConfig, num_heads_q: int) -> Mq3dScratchPlan:
-    model_config = vllm_config.model_config
-    num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
-    headdim = model_config.get_head_size()
+def mq3d_scratch_plan(
+    vllm_config: VllmConfig, num_heads_q: int, num_heads_kv: int, headdim: int
+) -> Mq3dScratchPlan:
     # The launch grid for the 2D kernel is defined as (num_q_blocks, num_heads_kv).
     # A lower bound for num_q_blocks is the number of sequences.
     # To ensure the minimum launch grid size is achieved, the number of sequences
@@ -298,8 +298,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.num_heads_q = get_num_attention_heads_from_layers(
             vllm_config, layer_names
         ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
-        self.headdim = model_config.get_head_size()
+        self.num_heads_kv = kv_cache_spec.num_kv_heads
+        self.headdim = kv_cache_spec.head_size
 
         # Check if CUDA Graphs are enabled for decode
         self.decode_cudagraph_enabled = (
@@ -336,10 +336,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # requires num_seqs <= seq_threshold_3D, and no batch can carry more query
         # tokens than the scheduler will place in one, so this is the smallest
         # capacity that can hold every policy-eligible batch.
-        plan = mq3d_scratch_plan(self.vllm_config, self.num_heads_q)
-        assert (plan.num_heads_kv, plan.headdim_padded) == (
-            self.num_heads_kv, next_power_of_2(self.headdim)
-        ), "int4 3D scratch plan geometry disagrees with the builder's"
+        plan = mq3d_scratch_plan(
+            self.vllm_config, self.num_heads_q, self.num_heads_kv, self.headdim
+        )
         self.seq_threshold_3D = plan.seq_threshold_3D
         self.max_query_len_3d = plan.max_query_len_3d
         scratch = mq3d_scratch_acquire(
@@ -610,6 +609,9 @@ class TritonAttentionImpl(AttentionImpl):
         k_scale_off_f32 = base_off_f32 + to_f32_units(hs)
         v_scale_off_f32 = base_off_f32 + to_f32_units(padded_hs + hs)
 
+        # Not initialized: each scale is written with its token before any
+        # unmasked read, and an extensible KV cache backs only a prefix of
+        # num_blocks during warmup.
         # K scales (first content half)
         self._k_scale_cache = torch.as_strided(
             base_f32,
@@ -625,6 +627,8 @@ class TritonAttentionImpl(AttentionImpl):
             stride=(block_f32, slot_f32, head_f32),
             storage_offset=v_scale_off_f32,
         )
+        if self._set_kv_ptr_range:
+            set_triton_ptr_range(kv_cache, self._k_scale_cache, self._v_scale_cache)
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
@@ -730,14 +734,14 @@ class TritonAttentionImpl(AttentionImpl):
 
         # Allocate the 3D scratch for this layer's head count while the memory
         # profile can still see it (Mq3dScratch above); the metadata builder
-        # adopts it later. Only num_heads is the layer's: head size and KV heads
-        # are the model config's, as the builder will derive them. Constructed
+        # adopts it later. The geometry is this layer's, the numbers its
+        # kv_cache_spec, and so its builder, will carry. Constructed
         # without a current config (unit tests), there is nothing to size from
         # and the builder allocates, unaccounted, as before.
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is not None and current_platform.is_cuda_alike():
             mq3d_scratch_acquire(
-                mq3d_scratch_plan(vllm_config, num_heads),
+                mq3d_scratch_plan(vllm_config, num_heads, num_kv_heads, head_size),
                 torch.device("cuda", torch.cuda.current_device()),
                 "model load",
             )
@@ -997,6 +1001,8 @@ class TritonAttentionImpl(AttentionImpl):
         if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
+        if self._set_kv_ptr_range:
+            set_triton_ptr_range(kv_cache, key_cache, value_cache)
         return key_cache, value_cache
 
     def _forward_encoder_attention(
@@ -1027,7 +1033,8 @@ class TritonAttentionImpl(AttentionImpl):
 
         # Use encoder-specific metadata for sequence information
         query_start_loc = attn_metadata.query_start_loc
-        seq_lens = attn_metadata.seq_lens
+        # No KV cache: K/V length is the query length, not seq_lens.
+        seq_lens = query_start_loc[1:] - query_start_loc[:-1]
         max_query_len = attn_metadata.max_query_len
 
         # Call flash attention directly on Q, K, V tensors

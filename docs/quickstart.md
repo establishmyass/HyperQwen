@@ -1,12 +1,14 @@
 # Quickstart (Docker)
 
-The one canonical path to a running server. Bare metal instead?
+For Inkling, use the [Inkling 2 Mini quick start](../README.md#inkling-2-mini).
+
+To run Qwen, follow the steps below. Bare metal instead?
 See [docs/install.md](install.md).
 
 [← back to the main README](../README.md)
 
 ```bash
-git clone https://github.com/syv-ai/HyperQwen && cd HyperQwen
+git clone https://github.com/establishmyass/HyperQwen && cd HyperQwen
 cp .env.example .env                      # PowerShell: Copy-Item .env.example .env
 make keygen                               # or: echo "VLLM_API_KEY=$(openssl rand -hex 24)" >> .env
 docker compose --profile single up -d     # chatting; `--profile batch` for an API backend
@@ -25,7 +27,7 @@ before switching). The shipped `.env` is the single-user DFlash2 profile
 [single-user/README.md](../single-user/README.md) and
 [batch/README.md](../batch/README.md).
 
-First boot usually takes **2–15 min** once the image is pulled (the entrypoint warns it can pass 30 min on a slow link or disk): it pulls the image (~9.5 GB), downloads and
+Compose builds the fork's Qwen image locally. First boot then downloads and
 requantizes the model (~20 GB, once, into `./models`), then compiles
 (torch.compile / CUDA graphs / FlashInfer JIT, cached in `qwen-cache`
 afterwards). Watch it with:

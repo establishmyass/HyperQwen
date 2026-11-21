@@ -2,7 +2,7 @@
 # checked-in script — no hidden flags. `make help` lists them.
 # Native (venv) launchers remain: bash single-user/start_qwen.sh etc.
 
-.PHONY: help up-single up-batch down logs ps verify verify-install shell keygen doctor
+.PHONY: help up-single up-batch up-inkling down logs ps verify verify-install shell keygen doctor
 
 help: ## show this list
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -15,11 +15,14 @@ up-batch: ## serve API backend / many concurrent
 	docker compose --profile batch up -d
 	@echo "first boot compiles (~2-15 min); follow with: make logs"
 
+up-inkling: ## serve Inkling 2 Mini on one supported GPU
+	docker compose --profile inkling up -d
+
 down: ## stop server
-	docker compose down
+	docker compose --profile '*' down
 
 logs: ## follow server logs (Ctrl-C anytime)
-	docker compose logs -f --tail 30
+	docker compose --profile '*' logs -f --tail 30
 
 ps: ## container state + /health from inside WSL/network namespace
 	docker ps --filter name=hyperqwen --format "{{.Names}} {{.Status}}"

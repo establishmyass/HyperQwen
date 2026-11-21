@@ -1,26 +1,22 @@
-# CMP 170HX decode tuning for HyperQwen (vLLM 0.33.0)
+# CMP 170HX decode tuning for HyperQwen (vLLM 0.34.0)
 
 Bind-mounted vLLM sources plus the matching environment settings for the CMP
 170HX (GA100, sm_80, 64 GiB). No image rebuild and no patch-series edit: the
-three files here are mounted read-only over the copies inside the vLLM 0.33.0
-image (`ghcr.io/syv-ai/hyperqwen:latest`), and removing those mounts returns
+three files here are mounted read-only over the copies inside the vLLM 0.34.0
+image (`localhost/hyperqwen-fork:local`), and removing those mounts returns
 the container to the stock image. `envs.py` is deliberately NOT overridden —
 the two knobs are read from the environment where they are used, so the
 overlay cannot drift from whatever `envs.py` the image ships (KVarN
 registrations, Turing knobs, the next pin).
 
-Cut against the vLLM 0.33.0 pin and the patch series as of upstream `8416768`
-(re-cut on 2026-11-10 from the 0.32.0 cut; the new `spec-attn-fp16` patch
-reworks this kernel, so the tuning hunks moved). The runtime behaviour is
-identical in spirit: this cut composes with the series' `OutOfResources`
-retry, which stays the safety net for any shape or device where a 64-token
-tile does not fit.
+The fork regenerates these files by applying the three patches in `patches/`
+to the vLLM 0.34.0 tree after HyperQwen and KVarN patch it. The
+`OutOfResources` retry still handles shapes where a 64-token tile does not fit.
 
 The measurements below were taken on the 2026-11-07 0.32.0 cut with
 `Qwen3.8-27B-W4A16-AutoRound` + the DFlash2 drafter (`k=7`), BF16 KV,
 `CTX=fast`, 256K context, driver 610.57.04, card pinned at 180 W. The kernel
-math did not change in the re-cut, so the deltas carry over; a re-run on the
-0.33.0 pin is pending.
+math did not change in the re-cut, and the 0.34.0 overlay still needs a hardware run.
 
 ## Changes
 

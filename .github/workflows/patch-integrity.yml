@@ -19,6 +19,17 @@ jobs:
           python-version: '3.12'
       - name: Check model verification and selection without a GPU
         run: python bench/test_model_verification.py
+      - name: Check Inkling runs independently and Qwen still prepares its weights
+        run: |
+          docker compose --profile inkling config --format json | jq -e '
+            (.services | keys) == ["inkling"] and
+            (.services.inkling | (has("build") | not) and
+              .command[0] == "thinkingmachines/Inkling-2-Mini" and
+              .ports[0].host_ip == "127.0.0.1" and
+              (.command[-1] | fromjson | .method == "dspark"))'
+          docker compose --profile single config --format json | jq -e '
+            (.services | keys) == ["prepare", "single"] and
+            .services.single.depends_on.prepare.condition == "service_completed_successfully"'
       - name: Check request metrics with and without speculative decoding
         run: python bench/test_request_metrics.py
       - name: Check doctor health and failed configuration diagnostics

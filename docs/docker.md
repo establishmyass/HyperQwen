@@ -9,7 +9,9 @@
 > 6. Verify with `make doctor`. Stuck? See [gotchas.md](gotchas.md).
 
 
-The container image (same stack, frozen) and an independent WSL2 reproduction with its memory caveats.
+For Inkling, see the [Inkling 2 Mini quick start](../README.md#inkling-2-mini).
+
+The Qwen container image (same stack, frozen) and an independent WSL2 reproduction with its memory caveats.
 
 [← back to the main README](../README.md)
 
@@ -25,7 +27,7 @@ configured as a runtime. The 250 W power limit is a host setting
 (`sudo nvidia-smi -pl 250`), the container cannot set it.
 
 ```bash
-git clone https://github.com/syv-ai/HyperQwen && cd HyperQwen
+git clone https://github.com/establishmyass/HyperQwen && cd HyperQwen
 cp .env.example .env                              # all knobs live in .env (gitignored)
 # PowerShell: Copy-Item .env.example .env
 echo "VLLM_API_KEY=$(openssl rand -hex 24)" >> .env   # skip only if the port stays on this machine (compose publishes on 127.0.0.1; add BIND=0.0.0.0 to serve other machines)
@@ -38,15 +40,9 @@ Docker Desktop with WSL2, leave `VLLM_WSL2_ENABLE_PIN_MEMORY=1` enabled; it is
 required by the V2 runner before model loading begins. The detailed failure
 signature and other WSL2 workarounds are below.
 
-**The image is prebuilt**: every push to `main` builds and pushes
-`ghcr.io/syv-ai/hyperqwen:latest` (plus an immutable `sha-<7>` tag
-per commit) from CI, with the Dockerfile's own patch application and
-`verify.sh --install` as the gate — a patch that stops applying fails the
-build and nothing is pushed. The first `up` pulls it (~9.5 GB,
-`pull_policy: missing`); to pin a known
-build, set `image: ghcr.io/syv-ai/hyperqwen:sha-<7>` in a compose
-override. Building locally instead still works — `docker compose build` (or
-`up --build`) produces the identical image (~20 minutes) — and the `prepare` service downloads
+Compose builds `localhost/hyperqwen-fork:local` from the fork’s Dockerfile.
+The build applies the pinned series and runs `verify.sh --install`. Subsequent
+starts reuse the build cache. The `prepare` service downloads
 the model into `./models` and runs the same requantization scripts as above
 (CPU only, idempotent, ~20 GB + a few minutes; `FAST_VARIANT=0` in `.env`
 skips the ~1 GB fast-variant download), then the server starts. The first
@@ -131,7 +127,7 @@ bf16, such as two RTX 2080 Ti 22 GB.
 
 ```bash
 echo 'GPU_COUNT=2' >> .env                 # the default hands the container one card
-docker compose build turing                # the prebuilt :latest image predates these patches
+docker compose build turing
 docker compose --profile turing up -d
 docker compose logs -f turing
 ```
@@ -152,13 +148,13 @@ docker compose logs -f turing
 ### Plain docker (no compose)
 
 Compose is convenience, not a requirement — profiles, `.env` passing and the
-separate `prepare` service, nothing the image needs. The same server, one
-command, no checkout:
+separate `prepare` service, nothing the image needs. From the fork checkout, build the Qwen image and run it directly:
 
 ```bash
+docker build -t localhost/hyperqwen-fork:local .
 docker run -d --name qwen --gpus all --ipc=host -p 127.0.0.1:18020:18020 \
   -v qwen-models:/app/models -v qwen-cache:/cache \
-  --restart unless-stopped ghcr.io/syv-ai/hyperqwen:latest
+  --restart unless-stopped localhost/hyperqwen-fork:local
 ```
 
 - The entrypoint runs the same idempotent `prepare` before serving, so the
@@ -294,4 +290,4 @@ hard abort rather than a tuning question:
 
    The model directory may remain on the Windows-mounted checkout; only the
    Linux venv needs native WSL storage. This workaround is for the manual WSL
-   venv path. The prebuilt Docker image already contains its own venv.
+   venv path. The Docker image already contains its own venv.

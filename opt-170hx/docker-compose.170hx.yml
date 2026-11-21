@@ -3,8 +3,8 @@
 #   docker compose -f docker-compose.yml -f opt-170hx/docker-compose.170hx.yml --profile single up -d
 #   docker compose -f docker-compose.yml -f opt-170hx/docker-compose.170hx.yml --profile batch  up -d
 #
-# The three files are cut against the vLLM 0.33.0 series (see opt-170hx/README.md)
-# and mount on the 0.33.0 image ONLY. They are mounted read-only over the copies
+# The three files are cut against the vLLM 0.34.0 series (see opt-170hx/README.md)
+# and mount on the 0.34.0 image ONLY. They are mounted read-only over the copies
 # inside the image; compose merges a
 # service's `volumes` lists across `-f` files, so the model and cache mounts from
 # the shared file stay. VERIFY=0 is required while the mounts are active:

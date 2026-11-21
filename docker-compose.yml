@@ -2,6 +2,7 @@
 #
 #   docker compose --profile single up -d     # low latency: MTP speculative decoding
 #   docker compose --profile batch  up -d     # throughput
+#   docker compose --profile inkling up -d    # Inkling 2 Mini on Hopper, Blackwell or DGX Spark
 #   docker compose --profile turing up -d     # RTX 20-series (set GPU_COUNT=2 in .env; docs/turing.md)
 #   docker compose run --rm prepare           # just download + requantize the model
 #   docker compose run --rm single verify     # verify.sh inside the container
@@ -62,14 +63,10 @@
 # other engine's live offload region.
 
 x-qwen: &qwen
-  # Prebuilt on every main push by .github/workflows/docker-image.yml; the
-  # first `up` pulls it (~9.5 GB, pull_policy below) instead of the 20-minute
-  # local build. `docker compose build` (or `up --build`) still builds the
-  # identical image under the same tag name. Immutable per-commit tags:
-  # ghcr.io/syv-ai/hyperqwen:sha-<7>.
-  image: ghcr.io/syv-ai/hyperqwen:latest
+  # Build the patched Qwen runtime from this checkout.
+  image: localhost/hyperqwen-fork:local
   build: .
-  pull_policy: missing
+  pull_policy: build
   ipc: host
   env_file:
     - path: .env
@@ -80,13 +77,10 @@ x-qwen: &qwen
     - ${MODELS_DIR:-./models}:/app/models
     - qwen-cache:/cache
 
-x-serve: &serve
-  <<: *qwen
+x-server-options: &server-options
+  ipc: host
   ports:
     - "${BIND:-127.0.0.1}:${PORT:-18020}:${PORT:-18020}"
-  depends_on:
-    prepare:
-      condition: service_completed_successfully
   deploy:
     resources:
       reservations:
@@ -105,9 +99,16 @@ x-serve: &serve
     retries: 3
     start_period: 900s   # first start: torch.compile + CUDA graphs + FlashInfer JIT
 
+x-serve: &serve
+  <<: [*qwen, *server-options]
+  depends_on:
+    prepare:
+      condition: service_completed_successfully
+
 services:
   prepare:
     <<: *qwen
+    profiles: [prepare, single, batch, turing, solo]
     command: prepare
 
   single:
@@ -119,6 +120,29 @@ services:
     <<: *serve
     profiles: [batch]
     command: batch
+
+  inkling:
+    <<: *server-options
+    profiles: [inkling]
+    image: docker.io/vllm/vllm-openai:inkling-2-mini@sha256:c2dc759f5984f69c1e2418c6af7c26eb756f5ed2a8934c768ae1253645d1449e
+    environment:
+      HF_HOME: /cache/huggingface
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+    volumes:
+      - inkling-cache:/cache/huggingface
+    command:
+      - thinkingmachines/Inkling-2-Mini
+      - --port
+      - "${PORT:-18020}"
+      - --max-model-len
+      - "${INKLING_MAX_LEN:-262144}"
+      - --reasoning-parser
+      - inkling
+      - --tool-call-parser
+      - inkling
+      - --enable-auto-tool-choice
+      - --speculative-config
+      - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
 
   # RTX 20-series (Turing, sm75), e.g. 2x RTX 2080 Ti 22 GB: fp16 W4A16 + DFlash2, FlashInfer
   # full graphs, TP picked from the visible cards. Put GPU_COUNT=2 in .env (the default hands
@@ -154,4 +178,5 @@ services:
       start_period: 900s
 
 volumes:
+  inkling-cache:
   qwen-cache:

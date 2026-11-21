@@ -1,5 +1,5 @@
 # Same stack as the README's venv install, frozen: Python 3.12 venv at /app/venv,
-# vLLM 0.34.0 (torch 2.14 / cu130 / Triton 3.7.1), every compatible patch in
+# vLLM 0.34.0 (torch 2.14 / cu130 / Triton 3.8.0), every compatible patch in
 # patches/ applied,
 # the KVarN KV cache installed, the pth-flash-attn op library built (pthfa/, selected by
 # PTH_FA=1, the default on an 8.6 GPU for SPEC=mtp or dflash2 CTX=long), verify.sh --install and the scratch-pool test run at build time.
@@ -11,7 +11,7 @@
 # that only happens once.
 #
 #   docker compose --profile single up -d      (see docs/docker.md)
-FROM nvidia/cuda:13.0.3-base-ubuntu24.04
+FROM docker.io/nvidia/cuda:13.0.3-base-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
