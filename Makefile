@@ -11,12 +11,12 @@ else
 ACTIVE_PROFILES = --profile '*'
 endif
 
-.PHONY: help up up-single up-batch up-inkling up-inkling-4090 up-inkling-4090-dspark down logs ps verify verify-install shell keygen doctor
+.PHONY: help up up-single up-batch up-inkling up-inkling-4090 up-inkling-4090-dspark up-inkling-4090-balanced down logs ps verify verify-install shell keygen doctor
 
 help: ## show this list
 	@grep -E '^[a-z0-9-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
-up: up-inkling-4090 ## serve Inkling with a 245760-token context on one RTX 4090
+up: up-inkling-4090-balanced ## serve Inkling with balanced prefill and DSpark decode on one RTX 4090
 
 up-single: ## serve one/few users (SPEC=dflash2 profile from .env)
 	$(COMPOSE) --profile single up -d
@@ -34,6 +34,9 @@ up-inkling-4090: ## serve Inkling 2 Mini on one 24 GB RTX 4090
 
 up-inkling-4090-dspark: ## serve Inkling with seven-token speculative decoding on one RTX 4090
 	$(COMPOSE) --profile inkling-4090-dspark up -d
+
+up-inkling-4090-balanced: ## serve Inkling with 1280-token prefill chunks and seven draft tokens
+	$(COMPOSE) --profile inkling-4090-balanced up -d
 
 down: ## stop server
 	$(COMPOSE) $(ACTIVE_PROFILES) down

@@ -164,49 +164,66 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    environment:
+    environment: &inkling-4090-environment
       <<: *inkling-environment
       VLLM_WSL2_ENABLE_PIN_MEMORY: ${VLLM_WSL2_ENABLE_PIN_MEMORY:-1}
-    command:
+      TRITON_CACHE_DIR: /root/.cache/triton
+    volumes:
+      - inkling-cache:/cache/huggingface
+      - inkling-4090-kernels:/root/.cache
+    entrypoint:
+      - vllm
+      - serve
+      - thinkingmachines/Inkling-2-Mini
+      - --port
+      - "${PORT:-18020}"
+      - --reasoning-parser
+      - inkling
+      - --tool-call-parser
+      - inkling
+      - --enable-auto-tool-choice
       - --max-model-len
-      - &inkling-4090-context "${INKLING_MAX_LEN:-245760}"
+      - "${INKLING_MAX_LEN:-245760}"
       - --max-num-seqs
       - "1"
-      - --max-num-batched-tokens
-      - "1792"
-      - --gpu-memory-utilization
-      - "${INKLING_GPU_UTIL:-0.97}"
       - --no-async-scheduling
       - --disable-extensible-kv-cache
       - --kv-cache-dtype
       - fp8
       - --compilation-config
-      - &inkling-4090-graph '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","decode_cudagraph_capture_request_sizes":[1]}'
+      - '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","decode_cudagraph_capture_request_sizes":[1]}'
       - --limit-mm-per-prompt
       - '{"image":1}'
+    command:
+      - --max-num-batched-tokens
+      - "1792"
+      - --gpu-memory-utilization
+      - "${INKLING_GPU_UTIL:-0.97}"
 
   inkling-4090-dspark:
     <<: *inkling-4090
     profiles: [inkling-4090-dspark]
     command:
-      - --max-model-len
-      - *inkling-4090-context
-      - --max-num-seqs
-      - "1"
       - --max-num-batched-tokens
       - "128"
       - --gpu-memory-utilization
       - "${INKLING_GPU_UTIL:-0.975}"
-      - --no-async-scheduling
-      - --disable-extensible-kv-cache
-      - --kv-cache-dtype
-      - fp8
-      - --compilation-config
-      - *inkling-4090-graph
-      - --limit-mm-per-prompt
-      - '{"image":1}'
       - --speculative-config
-      - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+      - &inkling-dspark '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+
+  inkling-4090-balanced:
+    <<: *inkling-4090
+    profiles: [inkling-4090-balanced]
+    environment:
+      <<: *inkling-4090-environment
+      INKLING_BALANCED_DSPARK: "1"
+    command:
+      - --max-num-batched-tokens
+      - "1280"
+      - --gpu-memory-utilization
+      - "${INKLING_GPU_UTIL:-0.976}"
+      - --speculative-config
+      - *inkling-dspark
 
   # RTX 20-series (Turing, sm75), e.g. 2x RTX 2080 Ti 22 GB: fp16 W4A16 + DFlash2, FlashInfer
   # full graphs, TP picked from the visible cards. Put GPU_COUNT=2 in .env (the default hands
@@ -242,5 +259,6 @@ services:
       start_period: 900s
 
 volumes:
+  inkling-4090-kernels:
   inkling-cache:
   qwen-cache:

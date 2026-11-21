@@ -27,18 +27,20 @@ jobs:
               .entrypoint[2] == "thinkingmachines/Inkling-2-Mini" and
               .ports[0].host_ip == "127.0.0.1" and
               (.command[-1] | fromjson | .method == "dspark"))'
-          docker compose --profile inkling-4090 config --format json | jq -e '
-            (.services | keys) == ["inkling-4090"] and
-            (.services["inkling-4090"] | has("build") and
-              .entrypoint[2] == "thinkingmachines/Inkling-2-Mini" and
-              .command[0:2] == ["--max-model-len", "245760"] and
-              .deploy.resources.reservations.devices[0].count == 1 and
-              (.command | index("--speculative-config") == null))'
-          docker compose --profile inkling-4090-dspark config --format json | jq -e '
-            (.services | keys) == ["inkling-4090-dspark"] and
-            (.services["inkling-4090-dspark"] | .command[0:2] == ["--max-model-len", "245760"] and
-              .deploy.resources.reservations.devices[0].count == 1 and
-              (.command[-1] | fromjson | .method == "dspark" and .num_speculative_tokens == 7))'
+          for profile in inkling-4090 inkling-4090-dspark inkling-4090-balanced; do
+            docker compose --profile "$profile" config --format json | jq -e --arg p "$profile" '
+              (.services | keys) == [$p] and
+              (.services[$p] | .entrypoint[2] == "thinkingmachines/Inkling-2-Mini" and
+                (.entrypoint | .[index("--max-model-len") + 1]) == "245760" and
+                .deploy.resources.reservations.devices[0].count == 1 and
+                any(.volumes[]; .target == "/root/.cache") and
+                (if $p == "inkling-4090" then (.command | index("--speculative-config") == null)
+                 else (.command[-1] | fromjson | .method == "dspark" and .num_speculative_tokens == 7) end) and
+                (if $p == "inkling-4090-balanced" then
+                   .environment.INKLING_BALANCED_DSPARK == "1" and .command[0:2] == ["--max-num-batched-tokens","1280"]
+                 else .environment.INKLING_BALANCED_DSPARK == null end))'
+          done
+          make -n ENGINE=docker up | grep -Fx 'docker compose --profile inkling-4090-balanced up -d'
           docker compose --profile single config --format json | jq -e '
             (.services | keys) == ["prepare", "single"] and
             .services.single.depends_on.prepare.condition == "service_completed_successfully"'

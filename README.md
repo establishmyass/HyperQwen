@@ -19,7 +19,7 @@
 
 This fork targets **one 24 GB RTX 4090 and one active request**. Its default model is
 Inkling 2 Mini with **245,760 total tokens** shared between the prompt and output.
-Both 4090 profiles serve the original checkpoint with text, images, reasoning and tool calls.
+The default enables **seven-token DSpark decoding** and processes long prompts in **1,280-token chunks**. All three profiles serve the original checkpoint with text, images, reasoning and tool calls.
 
 ```bash
 git clone https://github.com/establishmyass/HyperQwen && cd HyperQwen
@@ -29,33 +29,45 @@ make logs
 
 The Makefile uses Docker Compose when Docker is installed and Podman Compose otherwise.
 The server listens at `http://127.0.0.1:18020/v1`. The first start builds the Ada image
-and downloads the checkpoint into the persistent `inkling-cache` volume. Use `make down`
+and downloads the checkpoint into the persistent `inkling-cache` volume. The 4090 profiles share a second volume, `inkling-4090-kernels`, for compiled kernels across container recreations. Use `make down`
 before switching modes on the card. For Qwen's KVarN huge-context setup, see
 [Qwen quick start](#qwen-quick-start).
 
 ## Inkling 2 Mini
 
-| On one RTX 4090 | Command | Context limit | Best use |
+| On one RTX 4090 | Command | Prefill tokens per step | Drafting |
 |---|---|---:|---|
-| Large-document prefill | `make up` or `make up-inkling-4090` | 245,760 | Reading a new long prompt quickly |
-| DSpark | `make up-inkling-4090-dspark` | 245,760 | Generating long answers with the model's seven-token drafter |
+| **Balanced (default)** | `make up` or `make up-inkling-4090-balanced` | 1,280 | Seven DSpark tokens, with a 16,384-token window on the drafter’s global attention layer |
+| Target only | `make up-inkling-4090` | 1,792 | Off |
+| Full-history DSpark | `make up-inkling-4090-dspark` | 128 | Seven DSpark tokens with the checkpoint’s original draft attention windows |
 
-Both profiles use FP8 target KV, a decode CUDA graph for one request, and a fused
-expert-routing kernel for small batches. The input embedding table sits in pinned host RAM.
-The GPU gathers the rows each step needs. Vision weights are copied one module at a time
-when processing an image. DSpark also keeps its two lookup tables in pinned RAM and
-uses a BF16 draft KV cache. All model computation runs on the 4090.
+**The target sees all 245,760 tokens in every profile.** Balanced mode bounds only the
+drafter’s proposals. The target verifies those proposals against its full history.
+Grouping KV layers without padding makes room for larger prefill chunks. Global
+prefill skips the causal mask and relative-position bias calculation for tiles where
+every key is already visible and the bias is zero.
 
-The large-document profile processes 1,792 prompt tokens per step. DSpark leaves more memory
-for the drafter and processes 128 per step. Close other GPU workloads for the full window.
-To fit a busier desktop, reduce both `INKLING_MAX_LEN` and `INKLING_GPU_UTIL` in `.env`.
+The target uses FP8 KV and a single-request decode CUDA graph. Both DSpark modes use
+BF16 draft KV. The GPU gathers input embeddings from pinned host RAM, and reads
+vision weights one module at a time for image requests. DSpark also places two
+lookup tables in pinned host RAM. For a busier desktop, lower both `INKLING_MAX_LEN`
+and `INKLING_GPU_UTIL` in `.env`. Balanced mode defaults to 0.976 GPU utilization.
 
-| RTX 4090 profile | First token after 245,215 input tokens | Decode at that depth | Short-prompt decode |
+### Prefill and decode on one 4090
+
+| Profile | Uncached prompt | Time to first output token | Decode at that depth |
 |---|---:|---:|---:|
-| Large-document prefill | 51.7 s | 73.4 tok/s | 112.4 tok/s |
-| DSpark | 206.9 s | 194.6 tok/s | 193.2 tok/s |
+| Inkling balanced | 245,201–245,215 | **41.2–41.4 s** | **159.4–195.5 tok/s** |
+| Inkling target only | 245,215 | 51.7 s | 73.4 tok/s |
+| Inkling full-history DSpark | 245,215 | 206.9 s | 194.6 tok/s |
+| Strata with Unsloth Qwen3.8-Flash-Next UD-IQ3_XXS and MTP | 245,207–245,220 | 41.4–41.6 s | 105.5–120.2 tok/s |
 
-Both servers retrieved three passcodes placed at 2%, 50% and 96% depth in the same uncached prompt. Long-prompt timings are one localhost run per profile. Short-prompt decode is the median of three warm 128-output-token requests and includes reasoning tokens. DSpark speed depends on draft acceptance.
+The balanced and Strata ranges cover two independent cold prompts per engine on the same 24 GB RTX 4090. The other profiles were measured once. Each model retrieved
+three passcodes at 2%, 50% and 96% depth. Times include reasoning tokens and
+exclude model loading. The Strata row measures another checkpoint and tokenizer
+with four-token MTP. Draft acceptance and generation rates vary by prompt.
+
+The test host had 24,077 MiB of GPU memory free before startup. Across a container recreation, the first 3,949-token document dropped from 5.66 s to 0.61 s to first output with the kernel volume retained.
 
 For Hopper, datacenter Blackwell or DGX Spark, `make up-inkling` selects the upstream
 image and its 262,144-token default. Qwen uses patched vLLM 0.34.0. Inkling uses

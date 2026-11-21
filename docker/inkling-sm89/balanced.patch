@@ -1,0 +1,138 @@
+Single-request balanced SM89 profile for the pinned Inkling image. Keep the
+full verifier context, bound draft-only state, and skip masking for distant
+keys in global prefill tiles where every causal position has zero bias.
+
+--- a/vllm/models/inkling2/nvidia/dspark.py
++++ b/vllm/models/inkling2/nvidia/dspark.py
+@@ -5,6 +5,7 @@
+ recurrent (`rnn_hidden`) Markov head. Numerics follow the reference
+ implementation's draft (flashinfer RMSNorms, bf16 logits)."""
+ 
++import os
+ from collections.abc import Iterable
+ from typing import cast
+ 
+@@ -163,17 +164,25 @@
+         # Owns the paged KV cache only; the same spec as the target's layers
+         # (the scheduler keeps the last sliding_window_size positions before
+         # the block, which is what the draft reads).
++        draft_window = config.sliding_window_size if is_local else None
++        if (
++            draft_window is None
++            and os.environ.get("INKLING_BALANCED_DSPARK") == "1"
++            and current_platform.is_device_capability(89)
++        ):
++            # Only the proposal layer uses this window; the verifier keeps its global KV.
++            draft_window = 16384
+         self.attn = Attention(
+             self.num_heads,
+             self.head_dim,
+             self.head_dim**-0.5,
+             num_kv_heads=self.num_kv_heads,
+-            per_layer_sliding_window=config.sliding_window_size if is_local else None,
++            per_layer_sliding_window=draft_window,
+             prefix=f"{prefix}.attn",
+             attn_backend=FlashAttentionBackend,
+         )
+         # Keys a block sees: itself and, if local, the window before it.
+-        self.window = config.sliding_window_size + self.block if is_local else 0
++        self.window = draft_window + self.block if draft_window is not None else 0
+         vllm_config = get_current_vllm_config()
+         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+         self.register_buffer(
+--- a/vllm/v1/core/kv_cache_planning.py
++++ b/vllm/v1/core/kv_cache_planning.py
+@@ -3,6 +3,7 @@
+ """KV cache planning: grouping, sizing, and memory-fit logic."""
+ 
+ import math
++import os
+ from collections import Counter, defaultdict
+ from collections.abc import Callable, Iterable, Sequence
+ from dataclasses import replace
+@@ -506,6 +507,10 @@
+         # extra layers to one attention type.
+         group_size = max_num_layers
+     grouped_layers = []
++    if os.environ.get("INKLING_BALANCED_DSPARK") == "1" and len(sizing_buckets) < len(layer_buckets):
++        # Fit every bucket exactly. Charging eight target layers for one draft layer
++        # wastes most of each page across its 16K proposal window on the 4090.
++        group_size = math.gcd(group_size, *(len(layers) for layers in layer_buckets))
+     for layers in layer_buckets:
+         num_padding_layers = group_size - len(layers) % group_size
+         if num_padding_layers != group_size:
+--- a/vllm/models/inkling2/nvidia/ops/attention_sm90.py
++++ b/vllm/models/inkling2/nvidia/ops/attention_sm90.py
+@@ -14,7 +14,11 @@
+ holds for every replay of a CUDA graph.
+ """
+ 
++import os
++
+ import torch
++
++from vllm.platforms import current_platform
+ 
+ from vllm.triton_utils import tl, triton
+ 
+@@ -95,6 +99,7 @@
+     MODE: tl.constexpr,
+     BLOCK_M: tl.constexpr,
+     BLOCK_N: tl.constexpr,
++    FAST_FULL_PREFILL: tl.constexpr = False,
+ ):
+     TOKENS: tl.constexpr = BLOCK_M // G
+     E_PAD: tl.constexpr = E + 256
+@@ -167,15 +172,20 @@
+                 other=0.0,
+             ).to(q.dtype)
+         s = tl.dot(q, k) * qk_scale
+-        dist = pos[:, None] - keys[None, :]
+-        visible = (dist >= 0) & key_valid[None, :]
+-        if WINDOW > 0:
+-            visible &= dist < WINDOW
+-        if not DRAFT:
+-            in_extent = visible & (dist < E) & row_valid[:, None]
+-            bias = tl.load(rel_row[:, None] + keys[None, :], mask=in_extent, other=0.0)
+-            s += bias.to(tl.float32) * LOG2E
+-        s = tl.where(visible, s, float("-inf"))
++        needs_mask = True
++        if FAST_FULL_PREFILL:
++            # Keys before the earliest query's bias extent are all visible with zero bias.
++            needs_mask = (n + 1) * BLOCK_N > pos_lo - E + 1
++        if needs_mask:
++            dist = pos[:, None] - keys[None, :]
++            visible = (dist >= 0) & key_valid[None, :]
++            if WINDOW > 0:
++                visible &= dist < WINDOW
++            if not DRAFT:
++                in_extent = visible & (dist < E) & row_valid[:, None]
++                bias = tl.load(rel_row[:, None] + keys[None, :], mask=in_extent, other=0.0)
++                s += bias.to(tl.float32) * LOG2E
++            s = tl.where(visible, s, float("-inf"))
+         m_new = tl.maximum(m_i, tl.max(s, 1))
+         m_safe = tl.where(m_new == float("-inf"), 0.0, m_new)
+         alpha = tl.exp2(m_i - m_safe)
+@@ -303,6 +313,13 @@
+     else:
+         assert out.is_contiguous() and lse.is_contiguous()
+         out_strides = (0, 0, 0, 0)
++    fast_full_prefill = (
++        mode == MODE_OUT_LSE
++        and not draft
++        and window == 0
++        and os.environ.get("INKLING_BALANCED_DSPARK") == "1"
++        and current_platform.is_device_capability(89)
++    )
+     _rel_attention_kernel[grid](
+         q,
+         key_cache,
+@@ -339,5 +356,6 @@
+         BLOCK_M=block_m,
+         BLOCK_N=64 if block_m >= 128 else 128 if block_m <= 32 else 64,
+         num_warps=8 if block_m >= 128 else 4,
+-        num_stages=2,
+-    )
++        FAST_FULL_PREFILL=fast_full_prefill,
++        num_stages=1 if fast_full_prefill else 2,
++    )
