@@ -1,8 +1,12 @@
-"""Build padded expert blocks for Humming on SM89 using PyTorch GPU ops."""
+"""Build Humming expert blocks on SM89 for prompt chunks and single-request decoding."""
 import torch
 
 
 def align(ids, block_size, num_experts):
+    if ids.is_cuda and ids.is_contiguous() and 0 < ids.numel() <= 64:
+        from .route_sm89 import align_small
+
+        return align_small(ids, block_size, num_experts)
     sorted_experts, order = ids.flatten().sort(stable=True)
     num_slots = order.numel()
     experts = torch.arange(num_experts + 1, device=ids.device, dtype=ids.dtype)

@@ -1,0 +1,141 @@
+Single-RTX 4090 lookup and vision placement, and a BF16 DSpark cache written
+by the stock Triton scatter. Cut against the pinned Inkling release image.
+
+--- a/vllm/models/inkling2/nvidia/ops/__init__.py
++++ b/vllm/models/inkling2/nvidia/ops/__init__.py
+@@ -1,6 +1,19 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ import functools
++
++import torch
++
++
++def offload_lookup_sm89(table: torch.Tensor) -> None:
++    """Keep a read-only lookup table in pinned RAM and gather its selected rows on Ada."""
++    from vllm.platforms import current_platform
++    from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
++
++    if current_platform.is_device_capability(89) and not getattr(table, "_vllm_is_uva_offloaded", False):
++        host = table.detach().to(device="cpu").pin_memory()
++        table.data = get_accelerator_view_from_cpu_tensor(host)
++        table._vllm_is_uva_offloaded = True
+ 
+ 
+ @functools.cache
+--- a/vllm/models/inkling2/nvidia/loop.py
++++ b/vllm/models/inkling2/nvidia/loop.py
+@@ -26,6 +26,7 @@
+     Inkling2ForConditionalGeneration,
+     Inkling2Model,
+ )
++from .ops import offload_lookup_sm89
+ from .ops.attn_res import attn_res
+ from .ops.linear import linear_k_groups
+ from .ops.loop import blend_rms_norm, pair_rms_norm
+@@ -165,6 +166,7 @@
+         )
+ 
+     def process_weights_after_loading(self) -> None:
++        offload_lookup_sm89(self.embed_tokens.weight)
+         queries = self.middle_cycle_cross_pass_queries.view(-1, 2, self.hidden_size)
+         kv_queries = self.middle_cycle_cross_pass_kv_queries.view(
+             -1, 2, self.hidden_size
+--- a/vllm/models/inkling2/nvidia/model.py
++++ b/vllm/models/inkling2/nvidia/model.py
+@@ -17,6 +17,8 @@
+ import regex as re
+ import torch
+ from torch import nn
++
++from vllm.platforms import current_platform
+ 
+ from vllm.config import VllmConfig, get_current_vllm_config
+ from vllm.distributed import (
+@@ -571,6 +573,14 @@
+             from .loop import Inkling2LoopModel
+ 
+             model_cls = Inkling2LoopModel
++        if self.visual is not None and current_platform.is_device_capability(89):
++            from vllm.model_executor.offloader.uva import UVAOffloader
++
++            # Text decoding never reads these weights. Copy one module per vision forward.
++            tower = self.visual
++            offloader = UVAOffloader(1 << 30)
++            offloader.uva_offloading = False
++            offloader.wrap_modules(iter([*tower.backbone.layers, tower.proj_in, tower.proj_out]))
+         self.model = model_cls(text_config, quant_config, f"{prefix}model")
+         self.lm_head = ParallelLMHead(
+             text_config.padded_vocab_size, text_config.hidden_size
+--- a/vllm/models/inkling2/speculator_config.py
++++ b/vllm/models/inkling2/speculator_config.py
+@@ -15,10 +15,13 @@
+     @classmethod
+     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
+         super().adapt_draft_model_config(spec)
+-        if current_platform.is_device_capability_family(120):
++        if (
++            current_platform.is_device_capability_family(120)
++            or current_platform.is_device_capability(89)
++        ):
+             # The target's clipped, unit-scale FP8 cache does not describe the
+             # draft's unnormalized values. Keep the draft cache in BF16.
+             if spec.kv_cache_dtype is None:
+                 spec.kv_cache_dtype = "auto"
+             elif spec.kv_cache_dtype not in ("auto", "bfloat16"):
+-                raise ValueError("Inkling2 DSpark on SM12 requires BF16 draft KV")
++                raise ValueError("Inkling2 DSpark on SM12 and SM89 requires BF16 draft KV")
+--- a/vllm/models/inkling2/nvidia/dspark.py
++++ b/vllm/models/inkling2/nvidia/dspark.py
+@@ -10,6 +10,8 @@
+ 
+ import torch
+ from torch import nn
++
++from vllm.platforms import current_platform
+ 
+ from vllm.config import VllmConfig, get_current_vllm_config
+ from vllm.distributed import (
+@@ -38,6 +40,7 @@
+ 
+ from ..configs import Inkling2DSparkConfig
+ from ..speculator_config import Inkling2DSparkSpeculatorConfig
++from .ops import offload_lookup_sm89
+ from .ops.attention import block_decode_attention, plan_decode_attention
+ from .ops.dspark import (
+     add_softcap,
+@@ -188,6 +191,18 @@
+     def _write_kv(
+         self, k: torch.Tensor, v: torch.Tensor, slot_mapping: torch.Tensor
+     ) -> None:
++        if current_platform.is_device_capability(89):
++            from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
++                triton_reshape_and_cache_flash,
++            )
++
++            # The image ships the native draft scatter for newer GPUs.
++            kc, vc = self.attn.kv_cache.transpose(1, 2).split(self.head_dim, dim=-1)
++            triton_reshape_and_cache_flash(
++                k, v, kc, vc, slot_mapping, self.attn.kv_cache_dtype,
++                self.attn._k_scale, self.attn._v_scale,
++            )
++            return
+         impl = cast(FlashAttentionImpl, self.attn.impl)
+         impl.do_kv_cache_update(self.attn, k, v, self.attn.kv_cache, slot_mapping)
+ 
+@@ -413,6 +428,7 @@
+             rope_parameters={"rope_type": "default", "rope_theta": config.rope_theta},
+             dtype=torch.float32,
+         ).cos_sin_cache
++        offload_lookup_sm89(self.cos_sin_cache)
+         # Shared with the target model (see Inkling2DSparkModel.attach_target).
+         self.embed_tokens: nn.Module | None = None
+         self.embed_norm: nn.Module | None = None
+@@ -490,6 +506,7 @@
+         assert self.lm_head is not None and self.lm_head.weight.dtype == torch.bfloat16
+         self.model.embed_norm = target_model.model.embed_norm
+         head = self.model.markov_head
++        offload_lookup_sm89(head.markov_w1.weight)
+         head.rnn_bias = torch.empty_like(head.rnn_proj.bias, dtype=torch.float32)
+         self.refresh_derived_weights()
+ 

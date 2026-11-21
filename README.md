@@ -1,8 +1,8 @@
 <div align="center">
 
-<h1>HyperQwen</h1>
+<h1>HyperQwen for the RTX 4090</h1>
 
-<p><b>Large Qwen models, served fast on the GPUs people actually own.</b></p>
+<p><b>Long-context vLLM serving on one 24 GB RTX 4090.</b></p>
 
 <p>
 <a href="https://github.com/establishmyass/HyperQwen/actions/workflows/docker-image.yml"><img alt="docker image" src="https://github.com/establishmyass/HyperQwen/actions/workflows/docker-image.yml/badge.svg"></a>
@@ -13,18 +13,66 @@
 <a href="https://ko-fi.com/mhenrichsen"><img alt="support on Ko-fi" src="https://img.shields.io/badge/Ko--fi-support%20GPU%20time-FF5E5B?logo=kofi&logoColor=white"></a>
 </p>
 
-<a href="docs/media/demo.mp4"><img src="docs/media/demo.avif" alt="HyperQwen on one RTX 3090: one request against stock vLLM, replayed from recorded token arrivals, then 64 requests at once" width="100%"></a>
-
-<sub>One request against stock vLLM, replayed in real time from recorded token arrivals, then 64 at once.
-<a href="docs/media/demo.mp4">1080p60 MP4</a> · <a href="bench/demo">how it is made</a></sub>
-
 </div>
 
-**This fork serves two model families.** Qwen uses the HyperQwen patch series on
-vLLM 0.34.0. Inkling 2 Mini uses vLLM's dedicated image with text, image,
-reasoning and tool-call support. [Start Inkling 2 Mini](#inkling-2-mini)
+## Quick start
 
-**Today:** [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) on a single 24 GB
+This fork targets **one 24 GB RTX 4090 and one active request**. Its default model is
+Inkling 2 Mini with **245,760 total tokens** shared between the prompt and output.
+Both 4090 profiles serve the original checkpoint with text, images, reasoning and tool calls.
+
+```bash
+git clone https://github.com/establishmyass/HyperQwen && cd HyperQwen
+make up
+make logs
+```
+
+The Makefile uses Docker Compose when Docker is installed and Podman Compose otherwise.
+The server listens at `http://127.0.0.1:18020/v1`. The first start builds the Ada image
+and downloads the checkpoint into the persistent `inkling-cache` volume. Use `make down`
+before switching modes on the card. For Qwen's KVarN huge-context setup, see
+[Qwen quick start](#qwen-quick-start).
+
+## Inkling 2 Mini
+
+| On one RTX 4090 | Command | Context limit | Best use |
+|---|---|---:|---|
+| Large-document prefill | `make up` or `make up-inkling-4090` | 245,760 | Reading a new long prompt quickly |
+| DSpark | `make up-inkling-4090-dspark` | 245,760 | Generating long answers with the model's seven-token drafter |
+
+Both profiles use FP8 target KV, a decode CUDA graph for one request, and a fused
+expert-routing kernel for small batches. The input embedding table sits in pinned host RAM.
+The GPU gathers the rows each step needs. Vision weights are copied one module at a time
+when processing an image. DSpark also keeps its two lookup tables in pinned RAM and
+uses a BF16 draft KV cache. All model computation runs on the 4090.
+
+The large-document profile processes 1,792 prompt tokens per step. DSpark leaves more memory
+for the drafter and processes 128 per step. Close other GPU workloads for the full window.
+To fit a busier desktop, reduce both `INKLING_MAX_LEN` and `INKLING_GPU_UTIL` in `.env`.
+
+| RTX 4090 profile | First token after 245,215 input tokens | Decode at that depth | Short-prompt decode |
+|---|---:|---:|---:|
+| Large-document prefill | 51.7 s | 73.4 tok/s | 112.4 tok/s |
+| DSpark | 206.9 s | 194.6 tok/s | 193.2 tok/s |
+
+Both servers retrieved three passcodes placed at 2%, 50% and 96% depth in the same uncached prompt. Long-prompt timings are one localhost run per profile. Short-prompt decode is the median of three warm 128-output-token requests and includes reasoning tokens. DSpark speed depends on draft acceptance.
+
+For Hopper, datacenter Blackwell or DGX Spark, `make up-inkling` selects the upstream
+image and its 262,144-token default. Qwen uses patched vLLM 0.34.0. Inkling uses
+the model-specific vLLM image released after 0.34.0. [vLLM recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini) · [Model card](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
+
+Once the service is healthy, send a chat request. If you set `VLLM_API_KEY` or
+`PORT` in `.env`, export the same values in the client shell.
+
+```bash
+curl --fail-with-body "http://127.0.0.1:${PORT:-18020}/v1/chat/completions" \
+  -H "Authorization: Bearer ${VLLM_API_KEY:-EMPTY}" -H 'Content-Type: application/json' \
+  -d '{"model":"thinkingmachines/Inkling-2-Mini","messages":[{"role":"user","content":"What is 12 times 7?"}]}'
+```
+
+## Qwen profiles
+
+**Upstream Qwen measurements.** [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) on a single 24 GB
 consumer GPU with vLLM — 150k token context and an OpenAI-compatible API with key
 auth, in two ready-made modes. On an RTX 3090 at 250 W: 127 tok/s single-stream
 in single-user mode, ~1,035 tok/s aggregate decode at 64 concurrent in batch mode,
@@ -40,7 +88,7 @@ what is and is not portable yet, and
 [Field tests wanted](#field-tests-wanted) if you have half an hour on a GPU we
 have never touched.
 
-## Quick start
+### Qwen quick start
 
 ```bash
 git clone https://github.com/establishmyass/HyperQwen && cd HyperQwen
@@ -69,38 +117,14 @@ The model needs one card with 24 GB or more, or two cards together: on 16 GB or 
   [docs/docker.md](docs/docker.md#plain-docker-no-compose) ·
   [docs/install.md](docs/install.md)
 
-## Inkling 2 Mini
+For the upstream 245,760-token Qwen configuration, set `SPEC=dflash2`, `CTX=huge`,
+`PREFIX_CACHE=1` and `DFLASH_TOKENS=7` in `.env` and run `make up-single`.
+This selects the Qwen-specific KVarN cache and DFlash2 drafter. On a single-GPU Podman Compose 1.6 host, set `GPU_COUNT=all` in `.env` for the upstream Qwen services.
 
-Choose the profile for your GPU. Both expose the OpenAI-compatible API at
-`http://127.0.0.1:18020/v1` and cache the original ~20 GB checkpoint in
-`inkling-cache`. Stop the current server with `make down` before switching.
+<a href="docs/media/demo.mp4"><img src="docs/media/demo.avif" alt="HyperQwen on one RTX 3090: one request against stock vLLM, replayed from recorded token arrivals, then 64 requests at once" width="100%"></a>
 
-| GPU | Start from this checkout | Default context | Runtime |
-|---|---|---:|---|
-| **RTX 4090, 24 GB** | `make up-inkling-4090` | 8,192 tokens | Fork's SM89 port, FP8 KV, one active request, one image per prompt, eager execution |
-| **H100/H200, B200/GB200, B300/GB300 or DGX Spark** | `make up-inkling` | 262,144 tokens | Official vLLM image with the bundled DSpark drafter |
-
-Inkling’s looped architecture landed after vLLM 0.34.0. Both profiles use the same
-pinned Inkling image as their base and enable its reasoning and tool parsers.
-The 4090 profile builds a small local patch for Ada (compute capability 8.9).
-It uses FlashAttention 2 for vision, ordinary CUDA launches, and PyTorch to group
-expert inputs. DSpark is disabled on this profile. On a 24 GB RTX 4090, the
-original checkpoint answered a text question, read two different color-panel
-images, and returned a structured tool call. [vLLM recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini) · [Model card](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
-
-Follow startup with `make logs`. `INKLING_MAX_LEN` in `.env` overrides the
-profile's context limit subject to available GPU memory. On a single-GPU Linux
-host using Podman Compose and NVIDIA CDI, run
-`GPU_COUNT=all podman-compose --profile inkling-4090 up -d`.
-
-Once the service is healthy, send a chat request. If you set `VLLM_API_KEY` or
-`PORT` in `.env`, export the same values in the client shell.
-
-```bash
-curl --fail-with-body "http://127.0.0.1:${PORT:-18020}/v1/chat/completions" \
-  -H "Authorization: Bearer ${VLLM_API_KEY:-EMPTY}" -H 'Content-Type: application/json' \
-  -d '{"model":"thinkingmachines/Inkling-2-Mini","messages":[{"role":"user","content":"What is 12 times 7?"}]}'
-```
+<sub>One request against stock vLLM, replayed in real time from recorded token arrivals, then 64 at once.
+<a href="docs/media/demo.mp4">1080p60 MP4</a> · <a href="bench/demo">how it is made</a></sub>
 
 ## Which setup do I want?
 

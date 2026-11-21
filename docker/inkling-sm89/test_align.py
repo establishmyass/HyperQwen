@@ -1,12 +1,13 @@
 """Compare Humming's packed token indices and padding with a scalar reference."""
+import sys
+
 import torch
 
-from align_sm89 import align
 
-
-def check(values, block_size):
+def check(values, block_size, align, device):
     num_experts = 8
-    sorted_ids, block_ids, total = align(torch.tensor(values, dtype=torch.int32), block_size, num_experts)
+    ids = torch.tensor(values, dtype=torch.int32, device=device)
+    sorted_ids, block_ids, total = align(ids, block_size, num_experts)
     expected_ids, expected_blocks = [], []
     for expert in range(num_experts):
         slots = [i for i, value in enumerate(values) if value == expert]
@@ -20,6 +21,18 @@ def check(values, block_size):
 
 
 if __name__ == "__main__":
-    for block_size in (4, 16, 64):
-        for values in ([], [-1] * 12, [3], [2, 1, 3, 1, 8, -1, 0, 2], list(range(8)) * 17):
-            check(values, block_size)
+    if "--cuda" in sys.argv:
+        from vllm.models.inkling2.nvidia.ops.align_sm89 import align
+
+        device = "cuda"
+    else:
+        from align_sm89 import align
+
+        device = "cpu"
+    cases = [[], [-1] * 12, [3], [2, 1, 3, 1, 8, -1, 0, 2], list(range(8)) * 17]
+    generator = torch.Generator().manual_seed(73)
+    for size in (7, 8, 31, 56, 64, 65):
+        cases.append(torch.randint(-1, 10, (size,), generator=generator).tolist())
+    for block_size in (4, 16, 48, 64):
+        for values in cases:
+            check(values, block_size, align, device)

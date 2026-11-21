@@ -1,46 +1,60 @@
-# HyperQwen shortcuts. Every target delegates to docker compose or a
+# HyperQwen shortcuts. Every target delegates to the local container engine or a
 # checked-in script — no hidden flags. `make help` lists them.
 # Native (venv) launchers remain: bash single-user/start_qwen.sh etc.
 
-.PHONY: help up-single up-batch up-inkling up-inkling-4090 down logs ps verify verify-install shell keygen doctor
+ENGINE ?= $(if $(shell command -v docker),docker,podman)
+COMPOSE ?= $(ENGINE) compose
+# Podman Compose 1.6 requires named profiles. Its ps output is scoped to this project.
+ifeq ($(ENGINE),podman)
+ACTIVE_PROFILES = $(addprefix --profile=,$(sort $(shell $(COMPOSE) ps --format '{{.Label "com.docker.compose.service"}}' 2>/dev/null)))
+else
+ACTIVE_PROFILES = --profile '*'
+endif
+
+.PHONY: help up up-single up-batch up-inkling up-inkling-4090 up-inkling-4090-dspark down logs ps verify verify-install shell keygen doctor
 
 help: ## show this list
 	@grep -E '^[a-z0-9-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
+up: up-inkling-4090 ## serve Inkling with a 245760-token context on one RTX 4090
+
 up-single: ## serve one/few users (SPEC=dflash2 profile from .env)
-	docker compose --profile single up -d
+	$(COMPOSE) --profile single up -d
 	@echo "first boot compiles (~2-15 min); follow with: make logs"
 
 up-batch: ## serve API backend / many concurrent
-	docker compose --profile batch up -d
+	$(COMPOSE) --profile batch up -d
 	@echo "first boot compiles (~2-15 min); follow with: make logs"
 
 up-inkling: ## serve Inkling 2 Mini on one supported GPU
-	docker compose --profile inkling up -d
+	$(COMPOSE) --profile inkling up -d
 
 up-inkling-4090: ## serve Inkling 2 Mini on one 24 GB RTX 4090
-	docker compose --profile inkling-4090 up -d
+	$(COMPOSE) --profile inkling-4090 up -d
+
+up-inkling-4090-dspark: ## serve Inkling with seven-token speculative decoding on one RTX 4090
+	$(COMPOSE) --profile inkling-4090-dspark up -d
 
 down: ## stop server
-	docker compose --profile '*' down
+	$(COMPOSE) $(ACTIVE_PROFILES) down
 
 logs: ## follow server logs (Ctrl-C anytime)
-	docker compose --profile '*' logs -f --tail 30
+	$(COMPOSE) $(ACTIVE_PROFILES) logs -f --tail 30
 
 ps: ## container state + /health from inside WSL/network namespace
-	docker ps --filter name=hyperqwen --format "{{.Names}} {{.Status}}"
+	$(ENGINE) ps --filter name=hyperqwen --format "{{.Names}} {{.Status}}"
 	@curl -s -o /dev/null -w "health: HTTP %{http_code}\n" http://127.0.0.1:$${PORT:-18020}/health || true
 
 verify: ## verify.sh inside the running single/batch container (live checks included), else in a fresh one (no live server)
-	@svc=$$(docker compose ps --status running --services 2>/dev/null | grep -xE 'single|batch' | head -n1); \
-	if [ -n "$$svc" ]; then echo "verify: running inside the running '$$svc' service"; docker compose exec $$svc bash verify.sh; \
-	else echo "verify: no single/batch service running; live-server checks will be skipped"; docker compose run --rm single verify; fi
+	@svc=$$($(COMPOSE) ps --status running --services 2>/dev/null | grep -xE 'single|batch' | head -n1); \
+	if [ -n "$$svc" ]; then echo "verify: running inside the running '$$svc' service"; $(COMPOSE) exec $$svc bash verify.sh; \
+	else echo "verify: no single/batch service running; live-server checks will be skipped"; $(COMPOSE) run --rm single verify; fi
 
 verify-install: ## install-only checks (venv, vLLM, patches, KVarN): no GPU/model/server
 	bash verify.sh --install
 
 shell: ## throwaway shell in the server image (patches + venv, no GPU boot)
-	docker compose run --rm single bash
+	$(COMPOSE) run --rm single bash
 
 keygen: ## append a fresh VLLM_API_KEY to .env without clobbering it (safe to re-run: skips if set)
 	@if grep -q '^VLLM_API_KEY=.\+' .env 2>/dev/null; then echo ".env already has VLLM_API_KEY (presence-only check, value not shown)"; else KEY=$$(openssl rand -hex 24); printf 'VLLM_API_KEY=%s\n' "$$KEY" >> .env; echo "appended VLLM_API_KEY to .env"; fi

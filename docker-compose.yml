@@ -1,4 +1,4 @@
-# Qwen3.8-27B on one RTX 3090, containerized. See docs/docker.md.
+# The fork defaults to Inkling on one 24 GB RTX 4090 (make up). Qwen profiles follow.
 #
 #   docker compose --profile single up -d     # low latency: MTP speculative decoding
 #   docker compose --profile batch  up -d     # throughput
@@ -107,7 +107,7 @@ x-serve: &serve
 
 x-inkling: &inkling
   <<: *server-options
-  environment:
+  environment: &inkling-environment
     HF_HOME: /cache/huggingface
     VLLM_API_KEY: ${VLLM_API_KEY:-}
   volumes:
@@ -150,27 +150,63 @@ services:
       - --speculative-config
       - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
 
-  inkling-4090:
+  inkling-4090: &inkling-4090
     <<: *inkling
     profiles: [inkling-4090]
     image: localhost/hyperqwen-fork-inkling:sm89
     build: docker/inkling-sm89
     pull_policy: build
+    # A literal reservation also works with Podman Compose's NVIDIA CDI support.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      <<: *inkling-environment
+      VLLM_WSL2_ENABLE_PIN_MEMORY: ${VLLM_WSL2_ENABLE_PIN_MEMORY:-1}
     command:
       - --max-model-len
-      - "${INKLING_MAX_LEN:-8192}"
+      - &inkling-4090-context "${INKLING_MAX_LEN:-245760}"
       - --max-num-seqs
       - "1"
       - --max-num-batched-tokens
-      - "1024"
+      - "1792"
       - --gpu-memory-utilization
-      - "0.94"
+      - "${INKLING_GPU_UTIL:-0.97}"
+      - --no-async-scheduling
       - --disable-extensible-kv-cache
       - --kv-cache-dtype
       - fp8
-      - --enforce-eager
+      - --compilation-config
+      - &inkling-4090-graph '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","decode_cudagraph_capture_request_sizes":[1]}'
       - --limit-mm-per-prompt
       - '{"image":1}'
+
+  inkling-4090-dspark:
+    <<: *inkling-4090
+    profiles: [inkling-4090-dspark]
+    command:
+      - --max-model-len
+      - *inkling-4090-context
+      - --max-num-seqs
+      - "1"
+      - --max-num-batched-tokens
+      - "128"
+      - --gpu-memory-utilization
+      - "${INKLING_GPU_UTIL:-0.975}"
+      - --no-async-scheduling
+      - --disable-extensible-kv-cache
+      - --kv-cache-dtype
+      - fp8
+      - --compilation-config
+      - *inkling-4090-graph
+      - --limit-mm-per-prompt
+      - '{"image":1}'
+      - --speculative-config
+      - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
 
   # RTX 20-series (Turing, sm75), e.g. 2x RTX 2080 Ti 22 GB: fp16 W4A16 + DFlash2, FlashInfer
   # full graphs, TP picked from the visible cards. Put GPU_COUNT=2 in .env (the default hands

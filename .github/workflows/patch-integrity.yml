@@ -31,8 +31,14 @@ jobs:
             (.services | keys) == ["inkling-4090"] and
             (.services["inkling-4090"] | has("build") and
               .entrypoint[2] == "thinkingmachines/Inkling-2-Mini" and
-              .command[0:2] == ["--max-model-len", "8192"] and
+              .command[0:2] == ["--max-model-len", "245760"] and
+              .deploy.resources.reservations.devices[0].count == 1 and
               (.command | index("--speculative-config") == null))'
+          docker compose --profile inkling-4090-dspark config --format json | jq -e '
+            (.services | keys) == ["inkling-4090-dspark"] and
+            (.services["inkling-4090-dspark"] | .command[0:2] == ["--max-model-len", "245760"] and
+              .deploy.resources.reservations.devices[0].count == 1 and
+              (.command[-1] | fromjson | .method == "dspark" and .num_speculative_tokens == 7))'
           docker compose --profile single config --format json | jq -e '
             (.services | keys) == ["prepare", "single"] and
             .services.single.depends_on.prepare.condition == "service_completed_successfully"'
