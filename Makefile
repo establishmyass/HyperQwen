@@ -2,10 +2,10 @@
 # checked-in script — no hidden flags. `make help` lists them.
 # Native (venv) launchers remain: bash single-user/start_qwen.sh etc.
 
-.PHONY: help up-single up-batch up-inkling down logs ps verify verify-install shell keygen doctor
+.PHONY: help up-single up-batch up-inkling up-inkling-4090 down logs ps verify verify-install shell keygen doctor
 
 help: ## show this list
-	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
+	@grep -E '^[a-z0-9-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
 up-single: ## serve one/few users (SPEC=dflash2 profile from .env)
 	docker compose --profile single up -d
@@ -17,6 +17,9 @@ up-batch: ## serve API backend / many concurrent
 
 up-inkling: ## serve Inkling 2 Mini on one supported GPU
 	docker compose --profile inkling up -d
+
+up-inkling-4090: ## serve Inkling 2 Mini on one 24 GB RTX 4090
+	docker compose --profile inkling-4090 up -d
 
 down: ## stop server
 	docker compose --profile '*' down

@@ -1,0 +1,119 @@
+Cut against the official vllm/vllm-openai:inkling-2-mini image (7cb5dae22).
+On Ada, use ordered CUDA launches, portable conv/mix and FlashAttention 2
+for the image encoder. The shipped MoE alignment binary lacks the SM89
+kernel used by Humming, so group token slots with PyTorch on this GPU.
+
+SM89 bring-up reference: https://www.reddit.com/r/LocalLLaMA/comments/1y1n4k7/
+
+--- a/vllm/models/inkling2/quant_config.py
++++ b/vllm/models/inkling2/quant_config.py
+@@ -43,7 +43,7 @@
+ 
+     @classmethod
+     def get_min_capability(cls) -> int:
+-        return 90
++        return 89
+ 
+     @staticmethod
+     def get_config_filenames() -> list[str]:
+--- a/vllm/models/inkling2/nvidia/attention.py
++++ b/vllm/models/inkling2/nvidia/attention.py
+@@ -291,7 +291,10 @@
+         self.max_decode_query_len = max_decode_query_len(vllm_config)
+         cache_dtype = vllm_config.cache_config.cache_dtype
+         supported: tuple[str, ...] = ("auto", "bfloat16")
+-        if current_platform.is_device_capability_family(120):
++        if (
++            current_platform.is_device_capability_family(120)
++            or current_platform.is_device_capability(89)
++        ):
+             supported += ("float16", "fp8", "fp8_e4m3")
+         if cache_dtype not in supported:
+             raise ValueError(f"Inkling2 KV cache dtype must be one of {supported}")
+--- a/vllm/models/inkling2/nvidia/ops/conv_mix.py
++++ b/vllm/models/inkling2/nvidia/ops/conv_mix.py
+@@ -89,7 +89,10 @@
+     )
+     if sp is None:
+         assert halo == 0 and positions.shape[0] == num_tokens and x.dim() == 2
+-        if current_platform.is_device_capability_family(120):
++        if (
++            current_platform.is_device_capability_family(120)
++            or current_platform.is_device_capability(89)
++        ):
+             # Native conv/mix kernels require Hopper or SM10x. Keep the
+             # loop executor's cache writes and residual rounding on SM12x.
+             short_conv(
+--- a/vllm/models/inkling2/nvidia/vision.py
++++ b/vllm/models/inkling2/nvidia/vision.py
+@@ -91,7 +91,11 @@
+         else:
+             from vllm.vllm_flash_attn import flash_attn_varlen_func
+ 
+-            version = 2 if current_platform.is_device_capability_family(120) else 3
++            use_fa2 = (
++                current_platform.is_device_capability_family(120)
++                or current_platform.is_device_capability(89)
++            )
++            version = 2 if use_fa2 else 3
+             out = flash_attn_varlen_func(q, k, v, fa_version=version, **kwargs)
+         return self.out_proj(out.view(hidden.shape))
+ 
+--- a/triton/language/extra/cuda/gdc.py
++++ b/triton/language/extra/cuda/gdc.py
+@@ -20,6 +20,8 @@
+ 
+     See https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-griddepcontrol for more details.
+     """
++    if _semantic.builder.options.arch == "sm89":
++        return
+     core.inline_asm_elementwise("griddepcontrol.wait; // dummy $0", "=r", [], dtype=core.int32, is_pure=False, pack=1,
+                                 _semantic=_semantic)
+ 
+@@ -38,5 +40,7 @@
+ 
+     See https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-griddepcontrol for more details.
+     """
++    if _semantic.builder.options.arch == "sm89":
++        return
+     core.inline_asm_elementwise("griddepcontrol.launch_dependents; // dummy $0", "=r", [], dtype=core.int32,
+                                 is_pure=False, pack=1, _semantic=_semantic)
+--- a/triton/backends/nvidia/driver.py
++++ b/triton/backends/nvidia/driver.py
+@@ -292,7 +292,7 @@
+         self.profile_scratch_size = metadata.profile_scratch_size
+         self.profile_scratch_align = metadata.profile_scratch_align
+         self.launch_cooperative_grid = metadata.launch_cooperative_grid
+-        self.launch_pdl = metadata.launch_pdl
++        self.launch_pdl = metadata.launch_pdl and metadata.target.arch != 89
+ 
+     def __call__(self, gridX, gridY, gridZ, stream, function, kernel_metadata, launch_metadata, launch_enter_hook,
+                  launch_exit_hook, *args):
+--- a/vllm/models/inkling2/nvidia/ops/moe_sm90.py
++++ b/vllm/models/inkling2/nvidia/ops/moe_sm90.py
+@@ -300,12 +300,19 @@
+         # Expected local rows, which pick the kernel configs.
+         valid_rows = -(-rows * self.num_experts // num_global_experts)
+         block_m = {name: self._block_m(name, valid_rows) for name in ("w13", "w2")}
+-        alignments = {
+-            size: moe_align_block_size(
+-                ids, size, self.num_experts, ignore_invalid_experts=True
+-            )[:3]
+-            for size in set(block_m.values())
+-        }
++        if torch.cuda.get_device_capability(ids.device) == (8, 9):
++            from .align_sm89 import align
++
++            alignments = {
++                size: align(ids, size, self.num_experts) for size in set(block_m.values())
++            }
++        else:
++            alignments = {
++                size: moe_align_block_size(
++                    ids, size, self.num_experts, ignore_invalid_experts=True
++                )[:3]
++                for size in set(block_m.values())
++            }
+         gate_up = self._gemm(
+             "w13", x, rows, alignments[block_m["w13"]], topk, valid_rows
+         )

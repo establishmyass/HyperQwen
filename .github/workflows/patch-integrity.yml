@@ -24,9 +24,15 @@ jobs:
           docker compose --profile inkling config --format json | jq -e '
             (.services | keys) == ["inkling"] and
             (.services.inkling | (has("build") | not) and
-              .command[0] == "thinkingmachines/Inkling-2-Mini" and
+              .entrypoint[2] == "thinkingmachines/Inkling-2-Mini" and
               .ports[0].host_ip == "127.0.0.1" and
               (.command[-1] | fromjson | .method == "dspark"))'
+          docker compose --profile inkling-4090 config --format json | jq -e '
+            (.services | keys) == ["inkling-4090"] and
+            (.services["inkling-4090"] | has("build") and
+              .entrypoint[2] == "thinkingmachines/Inkling-2-Mini" and
+              .command[0:2] == ["--max-model-len", "8192"] and
+              (.command | index("--speculative-config") == null))'
           docker compose --profile single config --format json | jq -e '
             (.services | keys) == ["prepare", "single"] and
             .services.single.depends_on.prepare.condition == "service_completed_successfully"'
@@ -117,6 +123,8 @@ jobs:
         run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Check the KVARN_FP16_DEQUANT numerics gate without a GPU
         run: python kvarn/tests/test_kvarn_fp16_dequant_torch.py
+      - name: Check the RTX 4090 expert block layout against the scalar reference
+        run: python docker/inkling-sm89/test_align.py
 
   patch-index:
     runs-on: ubuntu-latest

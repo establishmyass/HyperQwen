@@ -105,6 +105,25 @@ x-serve: &serve
     prepare:
       condition: service_completed_successfully
 
+x-inkling: &inkling
+  <<: *server-options
+  environment:
+    HF_HOME: /cache/huggingface
+    VLLM_API_KEY: ${VLLM_API_KEY:-}
+  volumes:
+    - inkling-cache:/cache/huggingface
+  entrypoint:
+    - vllm
+    - serve
+    - thinkingmachines/Inkling-2-Mini
+    - --port
+    - "${PORT:-18020}"
+    - --reasoning-parser
+    - inkling
+    - --tool-call-parser
+    - inkling
+    - --enable-auto-tool-choice
+
 services:
   prepare:
     <<: *qwen
@@ -122,27 +141,36 @@ services:
     command: batch
 
   inkling:
-    <<: *server-options
+    <<: *inkling
     profiles: [inkling]
     image: docker.io/vllm/vllm-openai:inkling-2-mini@sha256:c2dc759f5984f69c1e2418c6af7c26eb756f5ed2a8934c768ae1253645d1449e
-    environment:
-      HF_HOME: /cache/huggingface
-      VLLM_API_KEY: ${VLLM_API_KEY:-}
-    volumes:
-      - inkling-cache:/cache/huggingface
     command:
-      - thinkingmachines/Inkling-2-Mini
-      - --port
-      - "${PORT:-18020}"
       - --max-model-len
       - "${INKLING_MAX_LEN:-262144}"
-      - --reasoning-parser
-      - inkling
-      - --tool-call-parser
-      - inkling
-      - --enable-auto-tool-choice
       - --speculative-config
       - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+
+  inkling-4090:
+    <<: *inkling
+    profiles: [inkling-4090]
+    image: localhost/hyperqwen-fork-inkling:sm89
+    build: docker/inkling-sm89
+    pull_policy: build
+    command:
+      - --max-model-len
+      - "${INKLING_MAX_LEN:-8192}"
+      - --max-num-seqs
+      - "1"
+      - --max-num-batched-tokens
+      - "1024"
+      - --gpu-memory-utilization
+      - "0.94"
+      - --disable-extensible-kv-cache
+      - --kv-cache-dtype
+      - fp8
+      - --enforce-eager
+      - --limit-mm-per-prompt
+      - '{"image":1}'
 
   # RTX 20-series (Turing, sm75), e.g. 2x RTX 2080 Ti 22 GB: fp16 W4A16 + DFlash2, FlashInfer
   # full graphs, TP picked from the visible cards. Put GPU_COUNT=2 in .env (the default hands

@@ -71,19 +71,27 @@ The model needs one card with 24 GB or more, or two cards together: on 16 GB or 
 
 ## Inkling 2 Mini
 
-From this checkout, start the server on one supported NVIDIA GPU. vLLM lists H100/H200, B200/GB200, B300/GB300 and DGX Spark. The published checkpoint is about 20 GB. The image’s Inkling quantizer requires compute capability 9.0 or higher. An RTX 4090 (8.9) fails this check before weights load. [vLLM recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini) · [Model card](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
+Choose the profile for your GPU. Both expose the OpenAI-compatible API at
+`http://127.0.0.1:18020/v1` and cache the original ~20 GB checkpoint in
+`inkling-cache`. Stop the current server with `make down` before switching.
 
-```bash
-make up-inkling
-docker compose logs -f inkling
-```
+| GPU | Start from this checkout | Default context | Runtime |
+|---|---|---:|---|
+| **RTX 4090, 24 GB** | `make up-inkling-4090` | 8,192 tokens | Fork's SM89 port, FP8 KV, one active request, one image per prompt, eager execution |
+| **H100/H200, B200/GB200, B300/GB300 or DGX Spark** | `make up-inkling` | 262,144 tokens | Official vLLM image with the bundled DSpark drafter |
 
-The first start downloads the weights into the persistent `inkling-cache` volume.
-The profile uses the upstream `inkling-2-mini` image because support for the looped
-architecture landed after vLLM 0.34.0. It enables the bundled DSpark drafter and
-the Inkling reasoning and tool parsers. The default context is 262,144 tokens.
-Set `INKLING_MAX_LEN` in `.env` to change it. Stop the current server with
-`make down` before switching profiles on the same GPU or port.
+Inkling’s looped architecture landed after vLLM 0.34.0. Both profiles use the same
+pinned Inkling image as their base and enable its reasoning and tool parsers.
+The 4090 profile builds a small local patch for Ada (compute capability 8.9).
+It uses FlashAttention 2 for vision, ordinary CUDA launches, and PyTorch to group
+expert inputs. DSpark is disabled on this profile. On a 24 GB RTX 4090, the
+original checkpoint answered a text question, read two different color-panel
+images, and returned a structured tool call. [vLLM recipe](https://recipes.vllm.ai/thinkingmachines/Inkling-2-Mini) · [Model card](https://huggingface.co/thinkingmachines/Inkling-2-Mini)
+
+Follow startup with `make logs`. `INKLING_MAX_LEN` in `.env` overrides the
+profile's context limit subject to available GPU memory. On a single-GPU Linux
+host using Podman Compose and NVIDIA CDI, run
+`GPU_COUNT=all podman-compose --profile inkling-4090 up -d`.
 
 Once the service is healthy, send a chat request. If you set `VLLM_API_KEY` or
 `PORT` in `.env`, export the same values in the client shell.
