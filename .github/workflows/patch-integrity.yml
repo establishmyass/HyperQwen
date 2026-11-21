@@ -40,7 +40,7 @@ jobs:
                    .environment.INKLING_BALANCED_DSPARK == "1" and .command[0:2] == ["--max-num-batched-tokens","1280"]
                  else .environment.INKLING_BALANCED_DSPARK == null end))'
           done
-          make -n ENGINE=docker up | grep -Fx 'docker compose --profile inkling-4090-balanced up -d'
+          make -n ENGINE=docker up | grep -Fx 'docker compose --profile inkling-4090-balanced up --build -d'
           docker compose --profile single config --format json | jq -e '
             (.services | keys) == ["prepare", "single"] and
             .services.single.depends_on.prepare.condition == "service_completed_successfully"'

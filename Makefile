@@ -36,7 +36,7 @@ up-inkling-4090-dspark: ## serve Inkling with seven-token speculative decoding o
 	$(COMPOSE) --profile inkling-4090-dspark up -d
 
 up-inkling-4090-balanced: ## serve Inkling with 1280-token prefill chunks and seven draft tokens
-	$(COMPOSE) --profile inkling-4090-balanced up -d
+	$(COMPOSE) --profile inkling-4090-balanced up --build -d
 
 down: ## stop server
 	$(COMPOSE) $(ACTIVE_PROFILES) down
